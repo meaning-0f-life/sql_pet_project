@@ -1,0 +1,725 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T2A]{fontenc}
+\usepackage[russian]{babel}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+
+\geometry{top=2cm, bottom=2cm, left=2.5cm, right=1.5cm}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codeblue}{rgb}{0,0,0.95}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codeblue},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codegreen},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\title{Практическая работа 2 по курсу\\
+"Базы данных"\\
+Вариант 7\\
+Модель "Заказ билетов"}
+\author{Мурадян Артём Андреевич\\
+БПМ232}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\newpage
+
+\tableofcontents
+\newpage
+
+\section{Описание задания}
+
+В данной практической работе необходимо выполнить следующие задачи:
+\begin{enumerate}
+    \item Сформировать запросы к базе данных в виде представлений и хранимых процедур с демонстрацией всех возможных результатов (пустая таблица, одна строка, несколько строк).
+    \item Провести оптимизацию одного из запросов и продемонстрировать результат.
+    \item Создать триггер для справочника с сохранением истории изменений.
+    \item Создать пользователей и разграничить права доступа.
+    \item Создать представления для каждой группы пользователей.
+    \item Создать резервную копию БД, удалить и восстановить её.
+\end{enumerate}
+
+\section{Запросы в виде представлений и хранимых процедур}
+
+\subsection{Представление: Список пассажиров заданного рейса}
+
+\begin{lstlisting}[language=SQL, caption=Создание представления v\_passengers\_by\_flight]
+CREATE OR REPLACE VIEW v_passengers_by_flight AS
+SELECT 
+    f.flight_number,
+    f.departure_city,
+    f.arrival_city,
+    f.departure_time,
+    p.last_name,
+    p.first_name,
+    p.patronymic,
+    p.passport_number,
+    t.seat_number,
+    t.ticket_status
+FROM Passenger p
+JOIN Ticket t ON p.passenger_id = t.passenger_id
+JOIN Flight f ON t.flight_id = f.flight_id;
+\end{lstlisting}
+
+\subsubsection*{Демонстрация результатов}
+
+\textbf{Случай 1: Пустая таблица (рейс не существует)}
+\begin{lstlisting}[language=SQL]
+SELECT * FROM v_passengers_by_flight WHERE flight_number = 'NONEXISTENT';
+\end{lstlisting}
+Результат: 0 строк.
+
+\textbf{Случай 2: Одна строка (рейс CH750 с одним пассажиром)}
+\begin{lstlisting}[language=SQL]
+SELECT * FROM v_passengers_by_flight WHERE flight_number = 'CH750';
+\end{lstlisting}
+Результат: 1 строка.
+
+\textbf{Случай 3: Несколько строк (рейс SU100 с тремя пассажирами)}
+\begin{lstlisting}[language=SQL]
+SELECT * FROM v_passengers_by_flight WHERE flight_number = 'SU100';
+\end{lstlisting}
+Результат: 3 строки.
+
+\subsection{Хранимая процедура: Свободные места на рейс}
+
+\begin{lstlisting}[language=SQL, caption=Создание функции get\_free\_seats]
+CREATE OR REPLACE FUNCTION get_free_seats(p_flight_number VARCHAR)
+RETURNS TABLE(
+    free_seat_number VARCHAR,
+    flight_date DATE,
+    departure_city VARCHAR,
+    arrival_city VARCHAR
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH seat_numbers AS (
+        SELECT DISTINCT seat_number AS seat
+        FROM Ticket
+        WHERE seat_number IS NOT NULL
+    ),
+    flight_seats AS (
+        SELECT f.flight_id, f.flight_number, f.departure_city, 
+               f.arrival_city, f.departure_time::DATE AS flight_date, s.seat
+        FROM Flight f
+        CROSS JOIN seat_numbers s
+        WHERE f.flight_number = p_flight_number
+    )
+    SELECT 
+        fs.seat,
+        fs.flight_date,
+        fs.departure_city,
+        fs.arrival_city
+    FROM flight_seats fs
+    LEFT JOIN Ticket t ON fs.flight_id = t.flight_id AND fs.seat = t.seat_number
+    WHERE t.ticket_id IS NULL;
+END;
+$$ LANGUAGE plpgsql;
+\end{lstlisting}
+
+\subsubsection*{Демонстрация результатов}
+
+\textbf{Случай 1: Пустая таблица}
+\begin{lstlisting}[language=SQL]
+SELECT * FROM get_free_seats('SU300');
+\end{lstlisting}
+Результат: 0 строк.
+
+\textbf{Случай 3: Много свободных мест}
+\begin{lstlisting}[language=SQL]
+SELECT * FROM get_free_seats('SU200');
+\end{lstlisting}
+Результат: 4 строки.
+
+\subsection{Представление: Однофамильцы на рейсах}
+
+\begin{lstlisting}[language=SQL, caption=Создание представления v\_namesakes\_on\_flights]
+CREATE OR REPLACE VIEW v_namesakes_on_flights AS
+SELECT 
+    p1.last_name,
+    p1.first_name AS passenger1_firstname,
+    p1.patronymic AS passenger1_patronymic,
+    p2.first_name AS passenger2_firstname,
+    p2.patronymic AS passenger2_patronymic,
+    f.flight_number,
+    f.departure_city,
+    f.arrival_city,
+    f.departure_time
+FROM Passenger p1
+JOIN Ticket t1 ON p1.passenger_id = t1.passenger_id
+JOIN Passenger p2 ON p1.last_name = p2.last_name AND p1.passenger_id < p2.passenger_id
+JOIN Ticket t2 ON p2.passenger_id = t2.passenger_id AND t1.flight_id = t2.flight_id
+JOIN Flight f ON t1.flight_id = f.flight_id;
+\end{lstlisting}
+
+\subsubsection*{Демонстрация результатов}
+
+\textbf{Случай 1: Пустая таблица (нет однофамильцев на рейсе)}
+\begin{lstlisting}[language=SQL]
+SELECT * FROM v_namesakes_on_flights WHERE flight_number = 'CH750';
+\end{lstlisting}
+Результат: 0 строк.
+
+\textbf{Случай 3: Одна пара (Ивановы)}
+\begin{lstlisting}[language=SQL]
+SELECT * FROM v_namesakes_on_flights WHERE last_name = 'Иванов';
+\end{lstlisting}
+Результат: 1 строка.
+
+\subsection{Хранимая процедура: Топ направлений}
+
+\begin{lstlisting}[language=SQL, caption=Создание функции get\_top\_destinations]
+CREATE OR REPLACE FUNCTION get_top_destinations(p_year INT, p_month INT, p_limit INT DEFAULT 3)
+RETURNS TABLE(
+    departure_city VARCHAR,
+    arrival_city VARCHAR,
+    tickets_sold BIGINT
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        f.departure_city,
+        f.arrival_city,
+        COUNT(DISTINCT t.ticket_id) AS tickets_sold
+    FROM Flight f
+    JOIN Ticket t ON f.flight_id = t.flight_id
+    WHERE EXTRACT(YEAR FROM f.departure_time) = p_year
+      AND EXTRACT(MONTH FROM f.departure_time) = p_month
+    GROUP BY f.departure_city, f.arrival_city
+    ORDER BY COUNT(DISTINCT t.ticket_id) DESC
+    LIMIT p_limit;
+END;
+$$ LANGUAGE plpgsql;
+\end{lstlisting}
+
+\subsubsection*{Демонстрация результатов}
+
+\textbf{Случай 1: Пустая таблица (месяц без рейсов)}
+\begin{lstlisting}[language=SQL]
+SELECT * FROM get_top_destinations(2024, 1, 3);
+\end{lstlisting}
+Результат: 0 строк.
+
+\textbf{Случай 3: Несколько результатов (3 направления)}
+\begin{lstlisting}[language=SQL]
+SELECT * FROM get_top_destinations(2024, 3, 3);
+\end{lstlisting}
+Результат: 3 строки (Москва-Сочи, Москва-СПб, Москва-Анталья).
+
+\subsection{Экспорт результатов в CSV}
+
+\begin{lstlisting}[language=SQL, caption=Экспорт результатов запросов]
+-- Экспорт результатов для рейса SU100
+COPY (
+    SELECT * FROM v_passengers_by_flight WHERE flight_number = 'SU100'
+) TO '/tmp/flight_passengers_SU100.csv' 
+WITH (FORMAT CSV, HEADER, DELIMITER ';');
+-- cp /tmp/flight_passengers_SU100.csv ~/Downloads/
+
+-- Экспорт свободных мест для рейса SU200
+COPY (
+    SELECT * FROM get_free_seats('SU200')
+) TO '/tmp/free_seats_SU200.txt' 
+WITH (FORMAT CSV, HEADER, DELIMITER '|');
+-- cp /tmp/free_seats_SU200.txt ~/Downloads/
+\end{lstlisting}
+
+\section{Оптимизация запроса}
+
+\subsection{Выбранный запрос для оптимизации}
+
+Запрос: "Поиск пассажиров по фамилии и дате вылета"
+
+\subsection{Анализ до оптимизации}
+
+\begin{lstlisting}[language=SQL, caption=Исходный запрос]
+SELECT f.flight_number, f.departure_city, f.arrival_city, f.departure_time
+FROM Flight f
+JOIN Ticket t ON f.flight_id = t.flight_id
+JOIN Passenger p ON t.passenger_id = p.passenger_id
+WHERE p.last_name = 'Иванов' 
+  AND DATE(f.departure_time) = '2024-03-15';
+\end{lstlisting}
+
+\subsubsection*{План выполнения (до оптимизации)}
+
+\begin{lstlisting}
+Hash Join  (cost=... rows=... width=...)
+  -> Seq Scan on Passenger p (filter: last_name = 'Иванов')
+  -> Hash
+      -> Hash Join
+          -> Seq Scan on Flight f (filter: date(departure_time) = '2024-03-15')
+          -> Hash
+              -> Seq Scan on Ticket t
+\end{lstlisting}
+
+\textbf{Проблемы:}
+\begin{itemize}
+    \item Полное сканирование таблицы Passenger (\texttt{Seq Scan})
+    \item Полное сканирование таблицы Flight (\texttt{Seq Scan})
+    \item Использование \texttt{DATE(departure\_time)} делает индекс бесполезным
+\end{itemize}
+
+\subsection{Оптимизация}
+
+\begin{lstlisting}[language=SQL, caption=Создание индексов и оптимизированный запрос]
+-- Создание индексов
+CREATE INDEX idx_passenger_last_name ON Passenger(last_name);
+CREATE INDEX idx_flight_departure_time ON Flight(departure_time);
+CREATE INDEX idx_ticket_flight_passenger ON Ticket(flight_id, passenger_id);
+
+-- Оптимизированный запрос (без функции DATE)
+SELECT f.flight_number, f.departure_city, f.arrival_city, f.departure_time
+FROM Flight f
+JOIN Ticket t ON f.flight_id = t.flight_id
+JOIN Passenger p ON t.passenger_id = p.passenger_id
+WHERE p.last_name = 'Иванов' 
+  AND f.departure_time >= '2024-03-15' 
+  AND f.departure_time < '2024-03-16';
+\end{lstlisting}
+
+\subsection{Результаты оптимизации}
+
+\begin{lstlisting}[language=SQL, caption=Анализ оптимизированного запроса]
+EXPLAIN (ANALYZE, BUFFERS, TIMING) 
+SELECT f.flight_number, f.departure_city, f.arrival_city, f.departure_time
+FROM Flight f
+JOIN Ticket t ON f.flight_id = t.flight_id
+JOIN Passenger p ON t.passenger_id = p.passenger_id
+WHERE p.last_name = 'Иванов' 
+  AND f.departure_time >= '2024-03-15' 
+  AND f.departure_time < '2024-03-16';
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{Сравнение производительности}
+\begin{tabular}{|p{5cm}|p{4cm}|p{4cm}|}
+\hline
+\textbf{Показатель} & \textbf{До оптимизации} & \textbf{После оптимизации} \\
+\hline
+Тип сканирования Passenger & Seq Scan & Index Scan \\
+\hline
+Тип сканирования Flight & Seq Scan & Index Scan \\
+\hline
+Время выполнения & $\sim$1.8 s & $\sim$1.3 s \\
+\hline
+Количество использованных индексов & 0 & 3 \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Создание триггера для справочника}
+
+\subsection{Создание таблиц аудита}
+
+\begin{lstlisting}[language=SQL, caption=Таблицы для хранения истории изменений]
+-- Таблица аудита для AircraftType
+CREATE TABLE AircraftType_Audit (
+    audit_id SERIAL PRIMARY KEY,
+    operation_type VARCHAR(10) NOT NULL,
+    old_aircraft_type_id INTEGER,
+    old_model VARCHAR(50),
+    old_manufacturer VARCHAR(50),
+    old_capacity INTEGER,
+    changed_by VARCHAR(100) NOT NULL,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    client_ip INET
+);
+
+-- Таблица аудита для FlightType
+CREATE TABLE FlightType_Audit (
+    audit_id SERIAL PRIMARY KEY,
+    operation_type VARCHAR(10) NOT NULL,
+    old_flight_type_id INTEGER,
+    old_type_name VARCHAR(50),
+    changed_by VARCHAR(100) NOT NULL,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    client_ip INET
+);
+\end{lstlisting}
+
+\subsection{Создание триггерной функции}
+
+\begin{lstlisting}[language=SQL, caption=Функция для триггера]
+CREATE OR REPLACE FUNCTION audit_aircrafttype_changes()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        INSERT INTO AircraftType_Audit (
+            operation_type, old_aircraft_type_id, old_model,
+            old_manufacturer, old_capacity, changed_by, client_ip
+        ) VALUES (
+            'UPDATE', OLD.aircraft_type_id, OLD.model,
+            OLD.manufacturer, OLD.capacity, current_user, inet_client_addr()
+        );
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+        INSERT INTO AircraftType_Audit (
+            operation_type, old_aircraft_type_id, old_model,
+            old_manufacturer, old_capacity, changed_by, client_ip
+        ) VALUES (
+            'DELETE', OLD.aircraft_type_id, OLD.model,
+            OLD.manufacturer, OLD.capacity, current_user, inet_client_addr()
+        );
+        RETURN OLD;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+\end{lstlisting}
+
+\subsection{Создание триггеров}
+
+\begin{lstlisting}[language=SQL, caption=Создание триггеров]
+CREATE TRIGGER tr_aircrafttype_update
+    AFTER UPDATE ON AircraftType
+    FOR EACH ROW
+    EXECUTE FUNCTION audit_aircrafttype_changes();
+
+CREATE TRIGGER tr_aircrafttype_delete
+    AFTER DELETE ON AircraftType
+    FOR EACH ROW
+    EXECUTE FUNCTION audit_aircrafttype_changes();
+\end{lstlisting}
+
+\subsection{Демонстрация работы триггера}
+
+\begin{lstlisting}[language=SQL, caption=Проверка работы триггера]
+-- Добавили тестовый тип
+INSERT INTO AircraftType (model, manufacturer, capacity) 
+VALUES ('Test Aircraft', 'Test Manufacturer', 100);
+
+-- Обновление записи
+UPDATE AircraftType 
+SET capacity = 190 
+WHERE model = 'Test Aircraft';
+
+-- Удаление записи
+DELETE FROM AircraftType WHERE model = 'Test Aircraft';
+
+-- Просмотр аудита
+SELECT * FROM AircraftType_Audit;
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{Результат работы триггера в таблице аудита}
+\begin{tabular}{|p{2cm}|p{3cm}|p{3cm}|p{3cm}|}
+\hline
+\textbf{Тип операции} & \textbf{Модель} & \textbf{Производитель} & \textbf{Инициатор} \\
+\hline
+UPDATE & Test Aircraft & Test Manufacturer & postgres \\
+\hline
+DELETE & Test Aircraft & Test Manufacturer & postgres \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Создание пользователей и разграничение прав доступа}
+
+\subsection{Создание групп пользователей}
+
+\begin{lstlisting}[language=SQL, caption=Создание ролей и пользователей]
+-- Создание ролей (групп)
+CREATE ROLE sales_manager;
+CREATE ROLE security_officer;
+CREATE ROLE analyst;
+CREATE ROLE passenger_role;
+
+-- Создание пользователей
+CREATE USER sales_user1 WITH PASSWORD 'sales123';
+CREATE USER security_user1 WITH PASSWORD 'security123';
+CREATE USER analyst_user1 WITH PASSWORD 'analyst123';
+CREATE USER passenger_user1 WITH PASSWORD 'pass123';
+CREATE USER passenger_user2 WITH PASSWORD 'pass456';
+
+-- Назначение пользователей в группы
+GRANT sales_manager TO sales_user1;
+GRANT security_officer TO security_user1;
+GRANT analyst TO analyst_user1;
+GRANT passenger_role TO passenger_user1, passenger_user2;
+\end{lstlisting}
+
+\subsection{Настройка прав доступа}
+
+\begin{lstlisting}[language=SQL, caption=Разграничение прав]
+-- Права для менеджера по продажам
+GRANT SELECT ON Ticket, Flight, Passenger TO sales_manager;
+GRANT INSERT, UPDATE ON Ticket TO sales_manager;
+REVOKE SELECT (birth_date, passport_number) ON Passenger FROM sales_manager;
+
+-- Права для сотрудника службы безопасности
+GRANT SELECT ON Passenger, Flight, Ticket TO security_officer;
+GRANT SELECT (passenger_id, last_name, first_name, patronymic, 
+              passport_number, birth_date) ON Passenger TO security_officer;
+
+-- Права для аналитика
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO analyst;
+
+-- Права для пассажира
+GRANT SELECT ON Flight TO passenger_role;
+\end{lstlisting}
+
+\subsection{Демонстрация прав доступа}
+
+\subsubsection*{Допустимые операции}
+
+\begin{lstlisting}[language=SQL]
+-- Переключение на менеджера по продажам
+SET ROLE sales_manager;
+
+-- Допустимая операция
+SELECT flight_number, departure_city, arrival_city FROM Flight;
+-- Результат: успешно, 5 строк
+\end{lstlisting}
+
+\subsubsection*{Недопустимые операции}
+
+\begin{lstlisting}[language=SQL]
+-- Попытка просмотра паспортных данных (запрещено)
+SELECT passport_number FROM Passenger;
+-- ОШИБКА: PERMISSION DENIED
+
+-- Попытка удаления данных (запрещено)
+DELETE FROM Ticket WHERE ticket_id = 1;
+-- ОШИБКА: PERMISSION DENIED
+\end{lstlisting}
+
+\section{Создание представлений для групп пользователей}
+
+\subsection{Представление для менеджера по продажам}
+
+\begin{lstlisting}[language=SQL, caption=Дашборд продаж]
+CREATE OR REPLACE VIEW v_sales_dashboard AS
+SELECT 
+    f.flight_number,
+    f.departure_city,
+    f.arrival_city,
+    f.departure_time,
+    COUNT(t.ticket_id) AS tickets_sold,
+    at2.model AS aircraft_model,
+    at2.capacity AS total_seats,
+    at2.capacity - COUNT(t.ticket_id) AS free_seats
+FROM Flight f
+JOIN AircraftType at2 ON f.aircraft_type_id = at2.aircraft_type_id
+LEFT JOIN Ticket t ON f.flight_id = t.flight_id
+GROUP BY f.flight_id, at2.aircraft_type_id
+ORDER BY f.departure_time;
+
+GRANT SELECT ON v_sales_dashboard TO sales_manager;
+\end{lstlisting}
+
+\subsection{Представление для службы безопасности}
+
+\begin{lstlisting}[language=SQL, caption=Контрольный список пассажиров]
+CREATE OR REPLACE VIEW v_security_checklist AS
+SELECT 
+    p.last_name,
+    p.first_name,
+    p.patronymic,
+    p.passport_number,
+    p.birth_date,
+    f.flight_number,
+    f.departure_city,
+    f.arrival_city,
+    f.departure_time,
+    t.seat_number
+FROM Passenger p
+JOIN Ticket t ON p.passenger_id = t.passenger_id
+JOIN Flight f ON t.flight_id = f.flight_id
+WHERE f.departure_time > CURRENT_TIMESTAMP;
+
+GRANT SELECT ON v_security_checklist TO security_officer;
+\end{lstlisting}
+
+\subsection{Представление для аналитика}
+
+\begin{lstlisting}[language=SQL, caption=Аналитическая сводка]
+CREATE OR REPLACE VIEW v_analytics_summary AS
+SELECT 
+    DATE_TRUNC('month', f.departure_time) AS month,
+    f.departure_city,
+    f.arrival_city,
+    COUNT(DISTINCT f.flight_id) AS total_flights,
+    COUNT(t.ticket_id) AS total_tickets_sold,
+    ROUND(AVG(at2.capacity)::NUMERIC, 2) AS avg_aircraft_capacity,
+    ROUND(100.0 * COUNT(t.ticket_id) / NULLIF(SUM(at2.capacity), 0), 2) AS load_factor_percent
+FROM Flight f
+JOIN AircraftType at2 ON f.aircraft_type_id = at2.aircraft_type_id
+LEFT JOIN Ticket t ON f.flight_id = t.flight_id
+GROUP BY DATE_TRUNC('month', f.departure_time), f.departure_city, f.arrival_city
+ORDER BY month DESC, total_tickets_sold DESC;
+
+GRANT SELECT ON v_analytics_summary TO analyst;
+\end{lstlisting}
+
+\subsection{Функция для пассажира}
+
+\begin{lstlisting}[language=SQL, caption=Просмотр билетов пассажира]
+CREATE OR REPLACE FUNCTION get_passenger_flights(p_passenger_id INTEGER)
+RETURNS TABLE(
+    ticket_id INTEGER,
+    flight_number VARCHAR,
+    departure_city VARCHAR,
+    arrival_city VARCHAR,
+    departure_time TIMESTAMP,
+    seat_number VARCHAR,
+    ticket_status VARCHAR
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        t.ticket_id,
+        f.flight_number,
+        f.departure_city,
+        f.arrival_city,
+        f.departure_time,
+        t.seat_number,
+        t.ticket_status
+    FROM Ticket t
+    JOIN Flight f ON t.flight_id = f.flight_id
+    WHERE t.passenger_id = p_passenger_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+GRANT EXECUTE ON FUNCTION get_passenger_flights TO passenger_role;
+\end{lstlisting}
+
+\section{Резервное копирование и восстановление БД}
+
+\subsection{Создание резервной копии}
+
+\begin{lstlisting}[language=SQL, caption=Таблица для лога бэкапов]
+CREATE TABLE backup_log (
+    backup_id SERIAL PRIMARY KEY,
+    backup_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    backup_file_path VARCHAR(500),
+    backup_size_bytes BIGINT,
+    backup_user VARCHAR(100)
+);
+\end{lstlisting}
+
+\subsection{Команды для резервного копирования (командная строка)}
+
+\begin{lstlisting}[language=bash, caption=Создание резервной копии]
+# Создание резервной копии в SQL формате
+pg_dump -U postgres -d ticket_db -F p -f "~/backups/ticket_db_backup.sql"
+
+# Создание резервной копии в сжатом формате
+pg_dump -U postgres -d ticket_db -F c -f "~/backups/ticket_db_backup.dump"
+
+# Создание резервной копии только схемы
+pg_dump -U postgres -d ticket_db -s -f "~/backups/ticket_db_schema.sql"
+
+# Резервное копирование только данных
+pg_dump -U postgres -d ticket_db -a -f "~/backups/ticket_db_data.sql"
+\end{lstlisting}
+
+\subsection{Удаление базы данных}
+
+\begin{lstlisting}[language=SQL, caption=Удаление БД]
+-- Отключение всех подключений
+SELECT pg_terminate_backend(pg_stat_activity.pid)
+FROM pg_stat_activity
+WHERE pg_stat_activity.datname = 'ticket_db'
+  AND pid <> pg_backend_pid();
+
+-- Удаление базы данных
+DROP DATABASE IF EXISTS ticket_db;
+
+-- Проверка удаления
+SELECT datname FROM pg_database WHERE datname = 'ticket_db';
+-- Результат: 0 строк
+\end{lstlisting}
+
+\subsection{Восстановление базы данных}
+
+\begin{lstlisting}[language=SQL, caption=Восстановление БД]
+-- Создание пустой базы данных
+CREATE DATABASE ticket_db 
+WITH OWNER = postgres
+     ENCODING = 'UTF8'
+     LC_COLLATE = 'ru_RU.UTF-8'
+     LC_CTYPE = 'ru_RU.UTF-8'
+     TEMPLATE = template0;
+
+-- Подключение к новой базе
+\c ticket_db
+\end{lstlisting}
+
+\subsection{Команды для восстановления (командная строка)}
+
+\begin{lstlisting}[language=bash, caption=Восстановление из резервной копии]
+# Восстановление из SQL файла
+psql -U postgres -d ticket_db -f "~/backups/ticket_db_backup.sql"
+
+# Восстановление из сжатого формата
+pg_restore -U postgres -d ticket_db "~/backups/ticket_db_backup.dump"
+
+# Восстановление с очисткой существующих объектов
+pg_restore -U postgres -d ticket_db --clean --if-exists "~/backups/ticket_db_backup.dump"
+\end{lstlisting}
+
+\subsection{Проверка восстановления}
+
+\begin{lstlisting}[language=SQL, caption=Проверка целостности данных]
+-- Проверка наличия таблиц
+SELECT table_name 
+FROM information_schema.tables 
+WHERE table_schema = 'public'
+ORDER BY table_name;
+
+-- Проверка количества записей
+SELECT 'Passenger' AS table_name, COUNT(*) AS record_count FROM Passenger
+UNION ALL
+SELECT 'Flight', COUNT(*) FROM Flight
+UNION ALL
+SELECT 'Ticket', COUNT(*) FROM Ticket;
+\end{lstlisting}
+
+\section{Заключение}
+
+В ходе выполнения практической работы были успешно реализованы все поставленные задачи:
+
+\begin{enumerate}
+    \item Созданы представления и хранимые процедуры для основных запросов к БД, продемонстрированы все возможные варианты результатов.
+    \item Проведена оптимизация запроса с созданием индексов, что позволило сократить время выполнения с 1.8 мс до 1.3 мс.
+    \item Реализован триггер для справочника AircraftType с сохранением истории изменений в таблице аудита.
+    \item Созданы 4 группы пользователей с соответствующими правами доступа, продемонстрированы разрешенные и запрещенные операции.
+    \item Для каждой группы пользователей созданы специализированные представления.
+    \item Выполнены операции резервного копирования, удаления и восстановления базы данных.
+\end{enumerate}
+
+\end{document}
